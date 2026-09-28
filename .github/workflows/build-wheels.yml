@@ -88,10 +88,13 @@ jobs:
         shell: bash
         run: |
           set -e
-          whl=$(ls dist/*.whl)
+          whl=$(ls "$PWD"/dist/*.whl)
           echo "Built: $whl"
           python -m pip install --upgrade pip
           python -m pip install "$whl"
+          # Run from an empty dir so the source tree's zenoh/ package doesn't shadow the installed wheel
+          smoke_dir=$(mktemp -d)
+          cd "$smoke_dir"
           python -c "import zenoh; print('zenoh import OK')"
 
       - name: Upload wheel
