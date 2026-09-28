@@ -1,0 +1,138 @@
+name: Build zenoh-python Windows wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      zenoh-ref:
+        description: "eclipse-zenoh/zenoh-python git ref to build (tag, branch or commit)"
+        required: true
+        default: "1.10.1"
+        type: string
+      release-tag:
+        description: "GitHub release tag to publish to (default: v<zenoh-ref>)"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      zenoh-ref: ${{ steps.vars.outputs.zenoh-ref }}
+      release-tag: ${{ steps.vars.outputs.release-tag }}
+    steps:
+      - id: vars
+        env:
+          DISPATCH_REF: ${{ inputs.zenoh-ref }}
+          DISPATCH_TAG: ${{ inputs.release-tag }}
+          PUSHED_TAG: ${{ github.ref_name }}
+        run: |
+          if [ -n "$DISPATCH_REF" ]; then
+            zenoh_ref="$DISPATCH_REF"
+            release_tag="${DISPATCH_TAG:-v${zenoh_ref#v}}"
+          else
+            release_tag="$PUSHED_TAG"
+            zenoh_ref="${PUSHED_TAG#v}"
+          fi
+          echo "zenoh-ref=$zenoh_ref" >> "$GITHUB_OUTPUT"
+          echo "release-tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "Building zenoh-python ref '$zenoh_ref', releasing as '$release_tag'"
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: amd64
+            runner: windows-latest
+          - name: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+    steps:
+      - name: Checkout zenoh-python (${{ needs.prepare.outputs.zenoh-ref }})
+        uses: actions/checkout@v4
+        with:
+          repository: eclipse-zenoh/zenoh-python
+          ref: ${{ needs.prepare.outputs.zenoh-ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup set profile minimal
+          rustup show
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: zenoh-python-win-${{ matrix.name }}
+
+      - name: Build wheel
+        uses: messense/maturin-action@v1
+        with:
+          args: --release --out dist
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -e
+          whl=$(ls dist/*.whl)
+          echo "Built: $whl"
+          python -m pip install --upgrade pip
+          python -m pip install "$whl"
+          python -c "import zenoh; print('zenoh import OK')"
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.name }}
+          path: dist/*.whl
+
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -lh dist/
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.release-tag }}
+          name: zenoh-python ${{ needs.prepare.outputs.zenoh-ref }} (Windows amd64 + arm64)
+          files: dist/*.whl
+          body: |
+            Windows wheels for [eclipse-zenoh/zenoh-python](https://github.com/eclipse-zenoh/zenoh-python) `${{ needs.prepare.outputs.zenoh-ref }}`.
+
+            Built with the `abi3-py39` stable ABI: one wheel per architecture works on **CPython 3.9 – 3.13**
+            (Python 3.8 is no longer supported by upstream).
+
+            | File | Platform |
+            |---|---|
+            | `eclipse_zenoh-*-win_amd64.whl` | Windows x86_64 (Intel/AMD 64-bit) |
+            | `eclipse_zenoh-*-win_arm64.whl` | Windows ARM64 |
+
+            Example:
+
+            ```powershell
+            pip install https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.release-tag }}/eclipse_zenoh-<VERSION>-cp39-abi3-win_amd64.whl
+            ```
